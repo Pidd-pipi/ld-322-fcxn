@@ -8,6 +8,7 @@ import (
 	ws "github.com/cygreenenv/greenhouse-panel/internal/websocket"
 	"log/slog"
 	"math/rand"
+	"sync"
 	"time"
 )
 
@@ -17,10 +18,24 @@ type MonitoringService struct {
 	alertRepo      *repository.AlertRepository
 	logger         *slog.Logger
 	hub            *ws.Hub
+	// 串行化同一传感器的写入与报警评估，保证读数顺序与报警闭环一致。
+	ingestMuLock sync.Mutex
+	ingestLocks  map[uint]*sync.Mutex
 }
 
 func NewMonitoringService(g *repository.GreenhouseRepository, s *repository.SensorRepository, a *repository.AlertRepository, l *slog.Logger, h *ws.Hub) *MonitoringService {
-	return &MonitoringService{g, s, a, l, h}
+	return &MonitoringService{greenhouseRepo: g, sensorRepo: s, alertRepo: a, logger: l, hub: h, ingestLocks: make(map[uint]*sync.Mutex)}
+}
+
+func (s *MonitoringService) ingestLock(sensorID uint) *sync.Mutex {
+	s.ingestMuLock.Lock()
+	defer s.ingestMuLock.Unlock()
+	mu, ok := s.ingestLocks[sensorID]
+	if !ok {
+		mu = &sync.Mutex{}
+		s.ingestLocks[sensorID] = mu
+	}
+	return mu
 }
 func (s *MonitoringService) ListGreenhouses() ([]model.Greenhouse, error) {
 	return s.greenhouseRepo.List()
@@ -33,21 +48,23 @@ func (s *MonitoringService) Ingest(sensorID uint, value float64) (*model.SensorR
 	if err != nil {
 		return nil, nil, err
 	}
+	lock := s.ingestLock(sensorID)
+	lock.Lock()
+	defer lock.Unlock()
 	reading := &model.SensorReading{SensorID: sensorID, Value: value, RecordedAt: time.Now()}
 	if err = s.sensorRepo.AddReading(reading); err != nil {
 		return nil, nil, err
 	}
-	var alert *model.Alert
-	if value < sensor.Threshold.MinValue || value > sensor.Threshold.MaxValue {
-		level := "warning"
-		if value < sensor.Threshold.MinValue*.8 || value > sensor.Threshold.MaxValue*1.2 {
-			level = "critical"
-		}
-		alert = &model.Alert{GreenhouseID: sensor.GreenhouseID, SensorID: sensor.ID, Level: level, Message: fmt.Sprintf("%s 当前值 %.2f%s 超出阈值 [%.2f, %.2f]", constants.SensorLabels[sensor.Type], value, sensor.Unit, sensor.Threshold.MinValue, sensor.Threshold.MaxValue), Value: value, Status: constants.AlertPending}
-		if err = s.alertRepo.Create(alert); err != nil {
-			return nil, nil, err
-		}
+	message := fmt.Sprintf("%s 当前值 %.2f%s 超出阈值 [%.2f, %.2f]", constants.SensorLabels[sensor.Type], value, sensor.Unit, sensor.Threshold.MinValue, sensor.Threshold.MaxValue)
+	alert, action, err := s.alertRepo.Reconcile(sensor, value, message)
+	if err != nil {
+		return nil, nil, err
+	}
+	switch action {
+	case repository.AlertActionCreated:
 		s.hub.Broadcast(constants.EventAlert, alert)
+	case repository.AlertActionUpdated, repository.AlertActionRecovered:
+		s.hub.Broadcast(constants.EventAlertUpd, alert)
 	}
 	s.hub.Broadcast("reading.created", reading)
 	return reading, alert, nil

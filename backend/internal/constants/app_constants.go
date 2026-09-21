@@ -12,8 +12,11 @@ const (
 	StatusOn        = "on"
 	AlertPending    = "pending"
 	AlertHandled    = "handled"
+	AlertRecovered  = "recovered"
 	RoleAdmin       = "admin"
 	SuccessMessage  = "ok"
 	EventAlert      = "alert.created"
+	EventAlertUpd   = "alert.updated"
+	EventAlertRecv  = "alert.recovered"
 	EventDevice     = "device.updated"
 )
