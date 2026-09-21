@@ -1,0 +1,2 @@
+-- Schema is managed by GORM AutoMigrate on application startup.
+-- This file documents the initial migration boundary for DBAs.

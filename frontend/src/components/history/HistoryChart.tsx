@@ -1,0 +1,1 @@
+import TrendChart from '../charts/TrendChart'; import type { Reading } from '../../types/domain'; export default function HistoryChart({readings}:{readings:Reading[]}){return <TrendChart readings={readings} height={420}/>}

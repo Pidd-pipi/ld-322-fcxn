@@ -1,0 +1,14 @@
+openapi: 3.0.3
+info:
+  title: Greenhouse Environment API
+  version: 1.0.0
+paths:
+  /healthz:
+    get:
+      responses: {'200': {description: Healthy}}
+  /api/v1/greenhouses:
+    get: {summary: List greenhouses, responses: {'200': {description: OK}}}
+  /api/v1/readings:
+    post: {summary: Ingest a sensor reading, responses: {'201': {description: Created}}}
+  /api/v1/alerts:
+    get: {summary: List alerts, responses: {'200': {description: OK}}}
