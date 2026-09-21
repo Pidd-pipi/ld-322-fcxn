@@ -5,10 +5,82 @@ info:
 paths:
   /healthz:
     get:
-      responses: {'200': {description: Healthy}}
+      responses:
+        '200': {description: Healthy}
   /api/v1/greenhouses:
     get: {summary: List greenhouses, responses: {'200': {description: OK}}}
   /api/v1/readings:
-    post: {summary: Ingest a sensor reading, responses: {'201': {description: Created}}}
+    post:
+      summary: Ingest a sensor reading and evaluate its alert state
+      responses:
+        '201': {description: Created}
   /api/v1/alerts:
-    get: {summary: List alerts, responses: {'200': {description: OK}}}
+    get:
+      summary: List alerts
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  code: {type: integer, example: 0}
+                  message: {type: string, example: ok}
+                  data:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/Alert'
+  /api/v1/alerts/{id}/handle:
+    patch:
+      summary: Acknowledge an open (pending) alert
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema: {type: integer}
+      responses:
+        '200':
+          description: Alert acknowledged
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  code: {type: integer, example: 0}
+                  data: {$ref: '#/components/schemas/Alert'}
+        '409':
+          description: Business conflict — alert already handled or already recovered
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  code: {type: integer, enum: [40901, 40902]}
+                  message: {type: string}
+components:
+  schemas:
+    Alert:
+      type: object
+      properties:
+        id: {type: integer}
+        greenhouseId: {type: integer}
+        sensorId: {type: integer}
+        level: {type: string, enum: [warning, critical]}
+        message: {type: string}
+        value: {type: number, description: Latest violating value}
+        status: {type: string, enum: [pending, handled, recovered]}
+        occurrenceCount: {type: integer, description: Consecutive out-of-range readings folded into this alert}
+        createdAt: {type: string, format: date-time}
+        acknowledgedAt: {type: string, format: date-time, nullable: true}
+        recoveredAt: {type: string, format: date-time, nullable: true}
+        recoveredValue: {type: number, nullable: true, description: First in-range reading that closed the alert}
+        handledAt: {type: string, format: date-time, nullable: true, deprecated: true}
+        sensor: {$ref: '#/components/schemas/Sensor'}
+    Sensor:
+      type: object
+      properties:
+        id: {type: integer}
+        name: {type: string}
+        type: {type: string}
+        unit: {type: string}

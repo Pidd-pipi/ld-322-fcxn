@@ -2,13 +2,15 @@ package service
 
 import (
 	"fmt"
+	"log/slog"
+	"math/rand"
+	"time"
+
 	"github.com/cygreenenv/greenhouse-panel/internal/constants"
 	"github.com/cygreenenv/greenhouse-panel/internal/model"
 	"github.com/cygreenenv/greenhouse-panel/internal/repository"
 	ws "github.com/cygreenenv/greenhouse-panel/internal/websocket"
-	"log/slog"
-	"math/rand"
-	"time"
+	"gorm.io/gorm"
 )
 
 type MonitoringService struct {
@@ -28,28 +30,88 @@ func (s *MonitoringService) ListGreenhouses() ([]model.Greenhouse, error) {
 func (s *MonitoringService) Detail(id uint) (*model.Greenhouse, error) {
 	return s.greenhouseRepo.Get(id)
 }
+
+// alertLevel classifies an out-of-range reading into warning or critical.
+func alertLevel(value float64, threshold model.Threshold) string {
+	if value < threshold.MinValue*constants.CriticalLevelFactor || value > threshold.MaxValue*(2-constants.CriticalLevelFactor) {
+		return constants.AlertLevelCritical
+	}
+	return constants.AlertLevelWarning
+}
+
+func alertMessage(sensor model.Sensor, value float64, threshold model.Threshold) string {
+	return fmt.Sprintf("%s 当前值 %.2f%s 超出阈值 [%.2f, %.2f]", constants.SensorLabels[sensor.Type], value, sensor.Unit, threshold.MinValue, threshold.MaxValue)
+}
+
+// Ingest persists a reading and keeps exactly one un-recovered alert per
+// sensor: repeated violations update the open alert's value/level/count, and a
+// reading back inside the threshold auto-recovers it. Reading and alert are
+// written in one transaction, so a failure rolls the whole ingestion back.
 func (s *MonitoringService) Ingest(sensorID uint, value float64) (*model.SensorReading, *model.Alert, error) {
 	sensor, err := s.sensorRepo.Get(sensorID)
 	if err != nil {
 		return nil, nil, err
 	}
 	reading := &model.SensorReading{SensorID: sensorID, Value: value, RecordedAt: time.Now()}
-	if err = s.sensorRepo.AddReading(reading); err != nil {
-		return nil, nil, err
-	}
 	var alert *model.Alert
-	if value < sensor.Threshold.MinValue || value > sensor.Threshold.MaxValue {
-		level := "warning"
-		if value < sensor.Threshold.MinValue*.8 || value > sensor.Threshold.MaxValue*1.2 {
-			level = "critical"
+	violation := value < sensor.Threshold.MinValue || value > sensor.Threshold.MaxValue
+	txErr := s.alertRepo.InTransaction(func(tx *gorm.DB) error {
+		if err := s.sensorRepo.AddReading(tx, reading); err != nil {
+			return err
 		}
-		alert = &model.Alert{GreenhouseID: sensor.GreenhouseID, SensorID: sensor.ID, Level: level, Message: fmt.Sprintf("%s 当前值 %.2f%s 超出阈值 [%.2f, %.2f]", constants.SensorLabels[sensor.Type], value, sensor.Unit, sensor.Threshold.MinValue, sensor.Threshold.MaxValue), Value: value, Status: constants.AlertPending}
-		if err = s.alertRepo.Create(alert); err != nil {
-			return nil, nil, err
+		open, err := s.alertRepo.OpenBySensor(tx, sensorID)
+		if err != nil {
+			return err
 		}
-		s.hub.Broadcast(constants.EventAlert, alert)
+		switch {
+		case violation && open != nil:
+			open.Value = value
+			open.Level = alertLevel(value, sensor.Threshold)
+			open.Message = alertMessage(*sensor, value, sensor.Threshold)
+			open.OccurrenceCount++
+			alert = open
+			if err := s.alertRepo.Save(tx, open); err != nil {
+				return err
+			}
+		case violation:
+			alert = &model.Alert{
+				GreenhouseID:    sensor.GreenhouseID,
+				SensorID:        sensor.ID,
+				Level:           alertLevel(value, sensor.Threshold),
+				Message:         alertMessage(*sensor, value, sensor.Threshold),
+				Value:           value,
+				Status:          constants.AlertPending,
+				OccurrenceCount: 1,
+			}
+			if err := s.alertRepo.Create(tx, alert); err != nil {
+				return err
+			}
+		case !violation && open != nil:
+			now := time.Now()
+			recoveredValue := value
+			open.Status = constants.AlertRecovered
+			open.RecoveredAt = &now
+			open.RecoveredValue = &recoveredValue
+			alert = open
+			if err := s.alertRepo.Save(tx, open); err != nil {
+				return err
+			}
+		}
+		return nil
+	})
+	if txErr != nil {
+		return nil, nil, txErr
 	}
-	s.hub.Broadcast("reading.created", reading)
+	if alert != nil {
+		if alert.Status == constants.AlertRecovered {
+			s.hub.Broadcast(constants.EventAlertRecovered, alert)
+		} else if alert.OccurrenceCount > 1 {
+			s.hub.Broadcast(constants.EventAlertUpdate, alert)
+		} else {
+			s.hub.Broadcast(constants.EventAlert, alert)
+		}
+	}
+	s.hub.Broadcast(constants.EventReading, reading)
 	return reading, alert, nil
 }
 func (s *MonitoringService) History(greenhouseID uint, types []string, start, end time.Time) ([]model.SensorReading, error) {

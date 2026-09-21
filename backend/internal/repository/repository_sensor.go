@@ -35,8 +35,8 @@ func (r *SensorRepository) Get(id uint) (*model.Sensor, error) {
 	}
 	return &sensor, nil
 }
-func (r *SensorRepository) AddReading(reading *model.SensorReading) error {
-	if err := r.db.Create(reading).Error; err != nil {
+func (r *SensorRepository) AddReading(tx *gorm.DB, reading *model.SensorReading) error {
+	if err := tx.Create(reading).Error; err != nil {
 		return fmt.Errorf("create reading: %w", err)
 	}
 	return nil

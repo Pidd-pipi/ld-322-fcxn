@@ -32,7 +32,7 @@ func (h *AlertHandler) Handle(c *gin.Context) {
 	if !ok {
 		return
 	}
-	row, err := h.service.Handle(id)
+	row, err := h.service.Acknowledge(id)
 	if err != nil {
 		Fail(c, err)
 		return
